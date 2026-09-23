@@ -1,5 +1,8 @@
 import asyncio
+import os
 from uuid import uuid4
+
+from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.types import (
     Message, CallbackQuery,
@@ -11,12 +14,26 @@ from pyrogram.errors import (
     PasswordHashInvalid, FloodWait
 )
 
-# ─────────────────── CONFIG ───────────────────
-API_ID    = 1234567                    # my.telegram.org se
-API_HASH  = "your_api_hash_here"       # my.telegram.org se
-BOT_TOKEN = "12345:ABC..."             # @BotFather se
-OWNER_ID  = 123456789                  # apna user id (@userinfobot)
-# ──────────────────────────────────────────────
+# ─────────────────── LOAD ENV ───────────────────
+load_dotenv()
+
+def _get_int(key: str) -> int:
+    val = os.getenv(key)
+    if not val:
+        raise RuntimeError(f"❌ Missing env var: {key}")
+    return int(val)
+
+def _get_str(key: str) -> str:
+    val = os.getenv(key)
+    if not val:
+        raise RuntimeError(f"❌ Missing env var: {key}")
+    return val.strip()
+
+API_ID    = _get_int("API_ID")
+API_HASH  = _get_str("API_HASH")
+BOT_TOKEN = _get_str("BOT_TOKEN")
+OWNER_ID  = _get_int("OWNER_ID")
+# ────────────────────────────────────────────────
 
 bot = Client(
     "session_gen_bot",
@@ -72,7 +89,6 @@ async def safe_edit_or_reply(message: Message, text: str, edit: bool, **kwargs):
 
 
 async def finish_login(message: Message, user_id: int, temp: Client, edit: bool):
-    # Export session + get_me
     try:
         session_string = await temp.export_session_string()
         me = await temp.get_me()
